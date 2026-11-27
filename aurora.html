@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ASCII Aurora</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #030812;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    canvas {
+      display: block;
+      width: min(100vw, 76.7442vh, 792px);
+      width: min(100vw, 76.7442dvh, 792px);
+      height: auto;
+      touch-action: manipulation;
+    }
+
+    canvas[hidden] {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas
+    id="aurora"
+    width="792"
+    height="1032"
+    aria-label="Aurora boreale ASCII riflessa su un lago ghiacciato"
+  ></canvas>
+
+  <script>
+    "use strict";
+
+    // Dimensioni, prospettiva e durata del ciclo
+    const canvas = document.getElementById("aurora");
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    const WIDTH = canvas.width;
+    const HEIGHT = canvas.height;
+    const LOOP = 20;
+    const TAU = Math.PI * 2;
+    const HORIZON = HEIGHT * 0.58;
+    const FOCAL = HEIGHT * 1.05;
+    const DRIFT = 0.60;
+    const CELL_W = 8;
+    const CELL_H = 12;
+    const COLS = WIDTH / CELL_W;
+    const ROWS = HEIGHT / CELL_H;
+    const FONT = 'Consolas, Menlo, "Courier New", monospace';
+
+    // La luce viene calcolata a un quarto della risoluzione.
+    const SCALE = 4;
+    const scene = document.createElement("canvas");
+    scene.width = WIDTH / SCALE;
+    scene.height = HEIGHT / SCALE;
+
+    const sceneCtx = scene.getContext("2d");
+    const image = sceneCtx.createImageData(scene.width, scene.height);
+    const pixels = image.data;
+    const skyRows = Math.round(HORIZON / SCALE);
+    const light = new Float32Array(scene.width * skyRows * 3);
+    const glow = new Float32Array(light.length);
+    const snowMap = new Float32Array(scene.width * scene.height);
+    const crackMap = new Float32Array(snowMap.length);
+
+    const GREEN = [0.16, 1.00, 0.40];
+    const VIOLET = [0.52, 0.22, 1.00];
+    const RED = [1.00, 0.12, 0.22];
+    const WHITE = [0.85, 1.00, 0.90];
+    const PINK = [1.00, 0.28, 0.62];
+    const BLUE = [0.14, 0.32, 1.00];
+
+    const SKY = " .  ' . : .  ";
+    const AURORA = ["'.:'`.", ":!i;:'", "!|il1|", "|I#H|I"];
+    const REFLECTION = ["  .   ", " . ' .", ".:!:'|", "|!:|i!"];
+    const SNOW = ["  . , ", " .,-. ", ".-~,-.", "-~=~-~"];
+
+    const curtains = [
+      {
+        fold: 0.091, foldFreq: 1.56, foldSpeed: 2,
+        base: 0.150, wave: 0.045, waveFreq: 0.86, waveSpeed: -3,
+        height: 0.30, brightness: 1.00, rays: 251,
+        violet: 0.30, red: 0, count: 760, seed: 0
+      },
+      {
+        fold: 0.044, foldFreq: 2.62, foldSpeed: -3,
+        base: 0.315, wave: 0.035, waveFreq: 1.48, waveSpeed: 2,
+        height: 0.17, brightness: 0.55, rays: 342,
+        violet: 0.40, red: 0.30, count: 550, seed: 2.1
+      },
+      {
+        fold: 0.022, foldFreq: 1.34, foldSpeed: 1,
+        base: 0.050, wave: 0.012, waveFreq: 0.86, waveSpeed: -1,
+        height: 0.07, brightness: 0.45, rays: 416,
+        violet: 0.10, red: 0, count: 360, seed: 4.4
+      }
+    ];
+
+    const surges = [
+      { time: 0.2,  direction:  1, kinds: [0],    spread: 0.85 },
+      { time: 3.2,  direction: -1, kinds: [1],    spread: 0.32 },
+      { time: 5.6,  direction:  1, kinds: [2],    spread: 0.32 },
+      { time: 8.0,  direction: -1, kinds: [3],    spread: 0.25 },
+      { time: 10.4, direction:  1, kinds: [4],    spread: 0.18 },
+      { time: 12.8, direction: -1, kinds: [1, 3], spread: 0.25 },
+      { time: 15.2, direction:  1, kinds: [2, 4], spread: 0.30 }
+    ];
+
+    const meteors = [
+      [0.0, -0.32, 0.05, 1.0,  1],
+      [6.7,  0.28, 0.04, 0.8, -1],
+      [11.8, -0.22, 0.13, 0.9, 1],
+      [17.2,  0.30, 0.08, 0.7, -1]
+    ];
+
+    function clamp(value, min = 0, max = 1) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function smooth(value) {
+      const x = clamp(value);
+      return x * x * (3 - 2 * x);
+    }
+
+    function mix(a, b, amount) {
+      return a + (b - a) * amount;
+    }
+
+    function project(angle) {
+      return WIDTH / 2 + FOCAL * Math.tan(angle);
+    }
+
+    function stormStrength(time) {
+      return smooth(time / 0.5) * (1 - smooth((time - 17) / 2.9));
+    }
+
+    // Un seme fisso conserva le stesse stelle e lo stesso paesaggio a ogni giro.
+    let seed = 5;
+
+    function random() {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed / 4294967296;
+    }
+
+    const tileSize = 256;
+    const noiseTile = Float32Array.from(
+      { length: tileSize * tileSize },
+      random
+    );
+
+    function noise(x, y) {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const fx = smooth(x - ix);
+      const fy = smooth(y - iy);
+      const left = ix & 255;
+      const right = (ix + 1) & 255;
+      const top = (iy & 255) * tileSize;
+      const bottom = ((iy + 1) & 255) * tileSize;
+
+      return mix(
+        mix(noiseTile[top + left], noiseTile[top + right], fx),
+        mix(noiseTile[bottom + left], noiseTile[bottom + right], fx),
+        fy
+      );
+    }
+
+    const cellSeeds = Uint16Array.from(
+      { length: COLS * ROWS },
+      () => Math.floor(random() * 9973)
+    );
+
+    const stars = Array.from({ length: 300 }, () => ({
+      x: project(mix(-0.38, 0.38, random())),
+      y: random() ** 1.3 * HEIGHT * 0.51,
+      brightness: random() ** 2.4,
+      rate: 3 + Math.floor(random() * 7),
+      phase: random() * TAU
+    }));
+
+    const frost = Array.from({ length: 600 }, () => ({
+      x: mix(-5, 5, random()),
+      z: random() * DRIFT * LOOP,
+      rate: 3 + Math.floor(random() * 6),
+      phase: random() * TAU
+    }));
+
+    // Profilo della riva, delle colline e degli abeti
+    const hills = new Float32Array(WIDTH);
+    const trees = new Float32Array(WIDTH);
+
+    for (let x = 0; x < WIDTH; x++) {
+      const hill = 0.7 * noise(x / 160, 34) + 0.3 * noise(x / 52, 90);
+      hills[x] = HEIGHT * (0.012 + 0.052 * hill ** 1.4);
+    }
+
+    for (let i = 0; i < 320; i++) {
+      const center = random() * WIDTH;
+      if (noise(center / 48, 17) < 0.45) continue;
+
+      const height = mix(7, 27, random());
+      const radius = mix(3, 8, random());
+      const start = Math.max(0, Math.floor(center - radius));
+      const end = Math.min(WIDTH - 1, Math.ceil(center + radius));
+
+      for (let x = start; x <= end; x++) {
+        const profile = height * (1 - Math.abs(x - center) / radius);
+        trees[x] = Math.max(trees[x], profile);
+      }
+    }
+
+    function activeSurges(time) {
+      const waves = [];
+
+      for (const surge of surges) {
+        const progress = (time - surge.time) / 1.8;
+        if (progress <= -0.1 || progress >= 1.3) continue;
+
+        waves.push({
+          ...surge,
+          center: surge.direction * (-0.48 + 0.96 * progress),
+          envelope: smooth(progress / 0.12)
+            * (1 - smooth((progress - 0.85) / 0.4))
+        });
+      }
+
+      return waves;
+    }
+
+    function paintAurora(time, activity, waves) {
+      light.fill(0);
+
+      const beat = TAU * time / LOOP;
+      const strength = 0.42 + 0.58 * activity;
+      const rates = new Float32Array(5);
+      const edgeColor = new Float32Array(3);
+      const bodyColor = new Float32Array(3);
+
+      for (const [index, curtain] of curtains.entries()) {
+        const direction = index % 2 === 0 ? 1 : -1;
+        let previousX = null;
+
+        for (let i = 0; i < curtain.count; i++) {
+          const u = i / (curtain.count - 1);
+          const v = u * 1.1;
+          const angle = -0.55 + v;
+          rates.fill(0);
+
+          for (const wave of waves) {
+            const distance = (angle - wave.center) / 0.12;
+            const amount = wave.envelope
+              * (Math.exp(-distance * distance) + wave.spread)
+              / Math.sqrt(wave.kinds.length);
+
+            for (const kind of wave.kinds) rates[kind] += amount;
+          }
+
+          const total = rates[0] + rates[1] + rates[2] + rates[3] + rates[4];
+          const foldAngle = TAU * curtain.foldFreq * v
+            + curtain.foldSpeed * beat + curtain.seed;
+          const x = project(
+            angle + curtain.fold * (1 + 0.6 * total) * Math.sin(foldAngle)
+          ) / SCALE;
+
+          const averageWidth = FOCAL / SCALE * 1.1 / curtain.count;
+          const coverage = previousX === null
+            ? averageWidth
+            : Math.abs(x - previousX);
+
+          previousX = x;
+          if (x < -1 || x >= scene.width) continue;
+
+          const waveHeight = Math.sin(
+            TAU * curtain.waveFreq * v + curtain.waveSpeed * beat
+            + 1.7 * curtain.seed
+          ) + 0.35 * Math.sin(TAU * 2.6 * v - 2 * beat + curtain.seed);
+
+          const hem = (HORIZON - HEIGHT * (
+            curtain.base + curtain.wave * waveHeight
+          )) / SCALE;
+
+          const offset = direction * tileSize * time / LOOP;
+          const lane = 64 * index + 17;
+          const fine = 0.65 * noise(v * curtain.rays + offset, lane)
+            + 0.35 * noise(v * curtain.rays * 1.7 - 2 * offset, lane + 200);
+          const coarse = noise(v * 140 + offset, lane + 90);
+
+          const height = curtain.height * HEIGHT / SCALE
+            * (0.40 + 0.75 * coarse) * (0.62 + 0.70 * fine)
+            * (0.40 + 0.60 * activity) * (1 + 0.3 * total);
+
+          const brightness = curtain.brightness * strength
+            * (0.5 + 0.5 * coarse) * (1 + 1.4 * total)
+            * smooth(u / 0.08) * smooth((1 - u) / 0.08)
+            * coverage * (1 + 1.3 * Math.exp(-coverage / (0.3 * averageWidth)));
+
+          const white = 0.8 * clamp(rates[0]);
+          const pink = clamp(1.2 * rates[1]);
+          const blue = clamp(1.2 * rates[4]);
+          const sum = white + pink + blue;
+
+          for (let c = 0; c < 3; c++) {
+            edgeColor[c] = 1.3 * (
+              GREEN[c] * clamp(1 - sum)
+              + (WHITE[c] * white + PINK[c] * pink + BLUE[c] * blue)
+                / Math.max(1, sum)
+            );
+          }
+
+          const left = Math.floor(x);
+          const fraction = x - left;
+          const firstRow = Math.max(0, Math.floor(hem - height - 1));
+          const lastRow = Math.min(skyRows - 1, Math.ceil(hem + 4));
+
+          for (let y = firstRow; y <= lastRow; y++) {
+            const distance = hem - y - 0.5;
+            const z = distance / height;
+            const edge = Math.exp(-(((distance - 0.8) / 1.3) ** 2));
+            const body = smooth(distance / 2)
+              * (0.25 + 0.75 * Math.exp(-2.6 * Math.max(0, z)))
+              * (1 - smooth((z - 0.45) / 0.55))
+              * (0.10 + 1.5 * fine ** 3);
+
+            const red = smooth((z - 0.30) / 0.45)
+              * clamp(curtain.red + 1.2 * rates[3]);
+            const violet = (1 - red) * smooth((z - 0.25) / 0.60)
+              * clamp(curtain.violet + rates[2]);
+
+            for (let c = 0; c < 3; c++) {
+              bodyColor[c] = GREEN[c] * (1 - red - violet)
+                + RED[c] * red * 2.2 + VIOLET[c] * violet * 1.4;
+
+              const value = brightness * (edge * edgeColor[c] + body * bodyColor[c]);
+              const pos = (y * scene.width + left) * 3 + c;
+
+              if (left >= 0) light[pos] += value * (1 - fraction);
+              if (left + 1 < scene.width) light[pos + 3] += value * fraction;
+            }
+          }
+        }
+      }
+
+      for (let i = 0; i < light.length; i++) {
+        light[i] = 1 - Math.exp(-0.95 * light[i]);
+      }
+    }
+
+    // Bagliore diffuso attorno ai raggi
+    function blurLight() {
+      const width = scene.width;
+      const radius = 4;
+      const diameter = radius * 2 + 1;
+      const temp = blurLight.temp ??= new Float32Array(light.length);
+
+      for (let y = 0; y < skyRows; y++) {
+        for (let c = 0; c < 3; c++) {
+          const start = y * width * 3 + c;
+          let sum = 0;
+
+          for (let k = -radius; k <= radius; k++) {
+            sum += light[start + clamp(k, 0, width - 1) * 3];
+          }
+
+          for (let x = 0; x < width; x++) {
+            temp[start + x * 3] = sum / diameter;
+            sum += light[start + clamp(x + radius + 1, 0, width - 1) * 3]
+              - light[start + clamp(x - radius, 0, width - 1) * 3];
+          }
+        }
+      }
+
+      for (let x = 0; x < width; x++) {
+        for (let c = 0; c < 3; c++) {
+          const column = x * 3 + c;
+          const stride = width * 3;
+          let sum = 0;
+
+          for (let k = -radius; k <= radius; k++) {
+            sum += temp[column + clamp(k, 0, skyRows - 1) * stride];
+          }
+
+          for (let y = 0; y < skyRows; y++) {
+            glow[column + y * stride] = sum / diameter;
+            sum += temp[column + clamp(y + radius + 1, 0, skyRows - 1) * stride]
+              - temp[column + clamp(y - radius, 0, skyRows - 1) * stride];
+          }
+        }
+      }
+    }
+
+    function paintLandscape(time) {
+      const width = scene.width;
+      const zenith = [10, 26, 78];
+      const skyline = [34, 84, 140];
+      const haze = [62, 118, 152];
+      const ice = [12, 30, 54];
+      const snowColor = [80, 104, 146];
+      const crackColor = [176, 218, 244];
+      const ambient = [0, 0, 0];
+
+      for (let y = 0; y < skyRows; y++) {
+        const up = 1 - (y + 0.5) * SCALE / HORIZON;
+        const base = zenith.map((value, c) =>
+          mix(
+            mix(value, skyline[c], (1 - up) ** 1.6),
+            haze[c],
+            0.5 * Math.exp(-up * 8)
+          )
+        );
+
+        for (let x = 0; x < width; x++) {
+          const pos = y * width + x;
+
+          for (let c = 0; c < 3; c++) {
+            const direct = light[pos * 3 + c];
+            const scattered = glow[pos * 3 + c];
+            pixels[pos * 4 + c] = base[c] + 255 * (0.92 * direct + 0.55 * scattered);
+            ambient[c] += direct;
+          }
+
+          pixels[pos * 4 + 3] = 255;
+        }
+      }
+
+      for (let c = 0; c < 3; c++) {
+        ambient[c] *= 255 * 2.4 / (width * skyRows);
+      }
+
+      for (let y = skyRows; y < scene.height; y++) {
+        const screenY = (y + 0.5) * SCALE;
+        const depth = Math.min(200, FOCAL * 1.60 / Math.max(0.5, screenY - HORIZON));
+        const ahead = depth + DRIFT * time;
+        const far = smooth((depth - 25) / 40);
+        const mirror = clamp(
+          Math.round((2 * HORIZON - screenY) / SCALE - 0.5),
+          0, skyRows - 1
+        );
+        const reflectivity = 0.88 - 0.50 * Math.exp(-depth / 7);
+
+        for (let x = 0; x < width; x++) {
+          const worldX = ((x + 0.5) * SCALE - WIDTH / 2) / FOCAL * depth;
+          const travel = ahead * tileSize / (DRIFT * LOOP);
+          const drift = noise(worldX * 3.4 + 30, travel);
+          const snow = smooth((drift - 0.64) / 0.10) * (1 - far) + 0.35 * far;
+
+          const longLine = noise(worldX * 1.8 + 120, travel);
+          const web = noise(worldX * 7 + 11, travel * 2);
+          const crack = (1 - snow) * Math.max(
+            Math.exp(-(((longLine - 0.5) / 0.017) ** 2)) * Math.exp(-depth / 22),
+            0.8 * Math.exp(-(((web - 0.5) / 0.018) ** 2)) * Math.exp(-depth / 8)
+          );
+
+          const pos = y * width + x;
+          snowMap[pos] = snow;
+          crackMap[pos] = crack;
+
+          for (let c = 0; c < 3; c++) {
+            const reflected =
+              0.45 * pixels[(mirror * width + x) * 4 + c]
+              + 0.33 * pixels[(Math.max(0, mirror - 1) * width + x) * 4 + c]
+              + 0.22 * pixels[(Math.max(0, mirror - 3) * width + x) * 4 + c];
+
+            const surface = mix(
+              ice[c] * (0.75 + 0.5 * web) + 0.25 * ambient[c],
+              reflected * 0.85,
+              reflectivity
+            );
+
+            const snowySurface = mix(
+              surface,
+              snowColor[c] * (0.80 + 0.35 * web) + 0.7 * ambient[c],
+              snow
+            );
+
+            pixels[pos * 4 + c] = mix(snowySurface, crackColor[c], 0.75 * crack);
+          }
+
+          pixels[pos * 4 + 3] = 255;
+        }
+      }
+
+      sceneCtx.putImageData(image, 0, 0);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+      ctx.globalAlpha = 0.74;
+      ctx.drawImage(scene, 0, 0, WIDTH, HEIGHT);
+      ctx.globalAlpha = 1;
+    }
+
+    function paintShore(profile, color, mirrored) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, HORIZON);
+
+      for (let x = 0; x < WIDTH; x += 2) {
+        ctx.lineTo(x, HORIZON + (mirrored ? profile[x] : -profile[x]));
+      }
+
+      ctx.lineTo(WIDTH, HORIZON);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function paintLetters(time) {
+      ctx.font = `13px ${FONT}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.globalCompositeOperation = "lighter";
+
+      let count = 0;
+
+      for (let row = 0; row < ROWS; row++) {
+        const y = (row + 0.5) * CELL_H;
+        const sy = Math.floor(y / SCALE);
+
+        for (let col = 0; col < COLS; col++) {
+          const x = (col + 0.5) * CELL_W;
+          const sx = Math.floor(x / SCALE);
+          const pos = sy * scene.width + sx;
+          const hash = cellSeeds[row * COLS + col];
+          const slow = hash + Math.floor(time * 1.8);
+          const quick = hash + Math.floor(time * 4.2 + hash % 11);
+          const r = pixels[pos * 4];
+          const g = pixels[pos * 4 + 1];
+          const b = pixels[pos * 4 + 2];
+          const brightness = (0.30 * r + 0.55 * g + 0.15 * b) / 255;
+          const distance = Math.abs(y - HORIZON);
+
+          let glyph;
+          let ink = 0.5;
+          let shore = false;
+
+          if (distance < trees[x] && trees[x] > 3) {
+            const tip = distance > trees[x] - CELL_H;
+            glyph = tip ? (y < HORIZON ? "A" : "V") : "#";
+            shore = true;
+          } else if (distance < hills[x]) {
+            glyph = distance > hills[x] - CELL_H ? "-" : (y < HORIZON ? ":" : ".");
+            shore = true;
+          } else if (sy < skyRows) {
+            const amount = light[pos * 3] * 0.30
+              + light[pos * 3 + 1] * 0.50 + light[pos * 3 + 2] * 0.30;
+
+            if (amount > 0.07) {
+              const pool = AURORA[clamp(Math.floor((amount - 0.07) * 6), 0, 3)];
+              glyph = pool[quick % pool.length];
+              ink = 0.42;
+            } else {
+              glyph = SKY[slow % SKY.length];
+            }
+          } else if (crackMap[pos] > 0.35) {
+            const dx = crackMap[pos + 1] - crackMap[pos - 1];
+            const dy = (crackMap[pos + scene.width] ?? 0)
+              - (crackMap[pos - scene.width] ?? 0);
+            const angle = Math.atan2(dx, -dy);
+            const slope = (Math.round(angle / (Math.PI / 4)) + 8) % 4;
+            glyph = ["-", "/", "|", "\\"][slope];
+            ink = 0.55;
+          } else {
+            const snowy = snowMap[pos] > 0.5;
+            const jitter = (hash % 100) / 100 - 0.5;
+            const level = snowy
+              ? (brightness - 0.30) / 0.10
+              : (brightness - 0.06) / 0.075;
+            const pool = (snowy ? SNOW : REFLECTION)[
+              clamp(Math.trunc(level + jitter), 0, 3)
+            ];
+
+            glyph = pool[(snowy ? slow : quick) % pool.length];
+            ink = snowy ? 0.30 : 0.40;
+          }
+
+          if (glyph === " ") continue;
+          count++;
+
+          if (shore) {
+            ctx.fillStyle = "rgba(41,59,79,0.6)";
+          } else {
+            const red = Math.min(255, r * 1.55 + 13);
+            const green = Math.min(255, g * 1.55 + 13);
+            const blue = Math.min(255, b * 1.55 + 13);
+            ctx.fillStyle = `rgba(${red},${green},${blue},${ink})`;
+          }
+
+          ctx.fillText(glyph, x, y);
+        }
+      }
+
+      ctx.globalCompositeOperation = "source-over";
+      return count;
+    }
+
+    function spark(x, y, radius, intensity) {
+      const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
+      gradient.addColorStop(0, `rgba(240,248,255,${intensity})`);
+      gradient.addColorStop(0.22, `rgba(195,225,255,${intensity * 0.42})`);
+      gradient.addColorStop(1, "rgba(160,210,255,0)");
+
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+    }
+
+    function paintStars(time) {
+      const beat = TAU * time / LOOP;
+      let count = 0;
+
+      ctx.font = `13px ${FONT}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.globalCompositeOperation = "lighter";
+
+      for (const star of stars) {
+        if (star.x < 1 || star.x >= WIDTH - 2) continue;
+        const brightness = star.brightness
+          * (0.62 + 0.38 * Math.sin(star.rate * beat + star.phase));
+
+        if (brightness <= 0.10) continue;
+        count++;
+
+        const sx = Math.floor(star.x / SCALE);
+        const sy = Math.floor(star.y / SCALE);
+        const pos = (sy * scene.width + sx) * 3;
+        const intensity = light[pos] * 0.3 + light[pos + 1] * 0.5 + light[pos + 2] * 0.3;
+        const glyph = brightness > 0.65 ? "*" : brightness > 0.35 ? "+" : ".";
+
+        ctx.fillStyle = `rgba(232,240,255,${brightness})`;
+        ctx.fillRect(star.x, star.y, brightness > 0.55 ? 2 : 1, 1);
+
+        if (intensity < 0.22 && brightness > 0.12) {
+          ctx.fillText(glyph, star.x, star.y);
+        }
+
+        const reflectedY = 2 * HORIZON - star.y;
+        if (reflectedY >= HEIGHT) continue;
+
+        const mirrorPos = Math.floor(reflectedY / SCALE) * scene.width + sx;
+        const reflected = 0.4 * brightness * (1 - snowMap[mirrorPos]);
+
+        if (reflected > 0.10) {
+          ctx.fillStyle = `rgba(193,215,245,${reflected})`;
+          ctx.fillText(reflected > 0.35 ? "+" : ".", star.x, reflectedY);
+        }
+      }
+
+      for (const point of frost) {
+        const strip = DRIFT * LOOP;
+        const z = ((point.z - DRIFT * time + strip) % strip) + 0.8;
+        const x = WIDTH / 2 + FOCAL * point.x / z;
+        const y = HORIZON + FOCAL * 1.60 / z;
+
+        if (x < 0 || x >= WIDTH || y >= HEIGHT) continue;
+
+        const pos = Math.floor(y / SCALE) * scene.width + Math.floor(x / SCALE);
+        const intensity = snowMap[pos] * Math.exp(-z / 4.5)
+          * Math.max(0, Math.sin(point.rate * beat + point.phase)) ** 10;
+
+        if (intensity > 0.12) spark(x, y, 8, intensity);
+      }
+
+      for (const [start, angle, down, distance, direction] of meteors) {
+        const age = (time - start) / 0.8;
+        if (age < 0 || age >= 1) continue;
+
+        const dx = HEIGHT * 0.34 * direction;
+        const dy = HEIGHT * 0.15;
+        const x = project(angle) + dx * distance * age;
+        const y = HEIGHT * down + dy * distance * age;
+
+        for (let k = 0; k < 14; k++) {
+          const fade = Math.sqrt(1 - age) * (1 - k / 14) ** 1.5;
+          const x1 = x - dx * 0.024 * k;
+          const y1 = y - dy * 0.024 * k;
+          const x2 = x1 - dx * 0.024;
+          const y2 = y1 - dy * 0.024;
+
+          for (const mirror of [false, true]) {
+            ctx.strokeStyle = `rgba(235,240,255,${fade * (mirror ? 0.35 : 1)})`;
+            ctx.lineWidth = k < 5 ? 3 : 2;
+            ctx.beginPath();
+            ctx.moveTo(x1, mirror ? 2 * HORIZON - y1 : y1);
+            ctx.lineTo(x2, mirror ? 2 * HORIZON - y2 : y2);
+            ctx.stroke();
+          }
+        }
+
+        spark(x, y, 17, Math.sqrt(1 - age));
+      }
+
+      ctx.globalCompositeOperation = "source-over";
+      return count;
+    }
+
+    function paintLabels(time, activity, waves, starsCount, lettersCount) {
+      const strength = Math.trunc((0.42 + 0.58 * activity) * 100);
+      const surge = waves.reduce((sum, wave) => sum + wave.envelope, 0);
+      const kp = clamp(Math.round(2 + 5 * activity + 1.5 * surge), 0, 9);
+
+      ctx.save();
+      ctx.font = `15px ${FONT}`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.shadowColor = "#040a1e";
+      ctx.shadowOffsetX = 1;
+      ctx.shadowOffsetY = 1;
+
+      const pad = value => String(value).padStart(3, " ");
+      const walked = (DRIFT * time).toFixed(1).padStart(4, " ");
+
+      ctx.fillStyle = "#e2f2ff";
+      ctx.fillText("@dwcminh.ascii", 24, HEIGHT - 109);
+
+      ctx.fillStyle = "#96c4cc";
+      ctx.fillText(
+        `aurora ${pad(strength)}%      kp ${kp}      stars ${pad(starsCount)}`,
+        24, HEIGHT - 81
+      );
+      ctx.fillText(
+        `letters ${lettersCount.toLocaleString("en-US")}      walked ${walked} m`,
+        24, HEIGHT - 60
+      );
+      ctx.fillText(
+        "Space pause · R restart · S screenshot · Esc quit",
+        24, HEIGHT - 39
+      );
+
+      ctx.textAlign = "right";
+      ctx.fillStyle = "#96ffbe";
+      const dot = Math.floor(time * 2) % 2 === 0 ? "●" : " ";
+      ctx.fillText(`${dot} t ${time.toFixed(2).padStart(5, "0")}s`, WIDTH - 24, 20);
+
+      ctx.restore();
+    }
+
+    function draw(time) {
+      const activity = stormStrength(time);
+      const waves = activeSurges(time);
+
+      paintAurora(time, activity, waves);
+      blurLight();
+      paintLandscape(time);
+
+      paintShore(hills, "#152036", true);
+      paintShore(trees, "#0c1524", true);
+      paintShore(hills, "#1a2844", false);
+      paintShore(trees, "#050b18", false);
+
+      const lettersCount = paintLetters(time);
+      const starsCount = paintStars(time);
+      paintLabels(time, activity, waves, starsCount, lettersCount);
+    }
+
+    // Riproduzione e controlli
+    let elapsed = 0;
+    let lastFrame = null;
+    let paused = false;
+    let stopped = false;
+
+    function animate(now) {
+      if (stopped) return;
+
+      if (!paused) {
+        if (lastFrame === null) lastFrame = now;
+
+        const delta = (now - lastFrame) / 1000;
+        if (delta >= 1 / 30) {
+          elapsed = (elapsed + Math.min(delta, 1 / 15)) % LOOP;
+          draw(elapsed);
+          lastFrame = now;
+        }
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    function togglePause() {
+      paused = !paused;
+      lastFrame = null;
+    }
+
+    function saveScreenshot() {
+      canvas.toBlob(blob => {
+        if (!blob) return;
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `aurora_${Math.floor(Date.now() / 1000)}.png`;
+        link.click();
+
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }, "image/png");
+    }
+
+    window.addEventListener("keydown", event => {
+      if (stopped || event.ctrlKey || event.metaKey || event.altKey) return;
+
+      switch (event.key.toLowerCase()) {
+        case " ":
+          event.preventDefault();
+          if (!event.repeat) togglePause();
+          break;
+
+        case "r":
+          elapsed = 0;
+          lastFrame = null;
+          draw(0);
+          break;
+
+        case "s":
+          if (!event.repeat) saveScreenshot();
+          break;
+
+        case "escape":
+          stopped = true;
+          canvas.hidden = true;
+          break;
+      }
+    });
+
+    // Su telefono, un tocco mette in pausa o riprende l'animazione.
+    canvas.addEventListener("click", togglePause);
+
+    draw(0);
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
